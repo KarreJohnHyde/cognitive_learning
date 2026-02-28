@@ -1,5 +1,5 @@
 # =============================================================================
-# app.py  –  CogniLearn Enterprise  |  Main entry point
+# app.py  –  CogniLearn Enterprise  |  AI-Based Cognitive Learning Pattern Analyzer
 #            Session-state bootstrap, authentication, sidebar, and the two
 #            top-level modes: Student Dashboard & AI Analytics Portal.
 # =============================================================================
@@ -39,11 +39,16 @@ from core.engine import (
     ai_generate_exam, ai_generate_quiz, ai_recommendations,
     ai_summarize, extract_text, local_generate_exam,
     local_generate_quiz, local_generate_summary,
+    compute_behavioral_features, classify_cognitive_pattern,
+    generate_adaptive_recommendations, generate_improvement_report,
+    COGNITIVE_PATTERNS,
 )
 from ui.components import (
     build_theme, inject_css,
     render_course_workspace, render_exam_paper,
     render_quiz, render_quiz_results, render_summary,
+    render_behavioral_analytics, render_adaptive_recommendations,
+    render_improvement_report,
     _course_progress_pct,
 )
 
@@ -52,8 +57,8 @@ from ui.components import (
 # =============================================================================
 
 st.set_page_config(
-    page_title="CogniLearn Enterprise",
-    page_icon="🎓",
+    page_title="CogniLearn — Cognitive Pattern Analyzer",
+    page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -68,7 +73,6 @@ DEFAULTS = {
     "global_level": 1, "quiz_history": [], "lesson_notes": {},
     "study_plan": {}, "streak_days": [], "last_login_date": None,
     "dark_mode": False,
-    # Event & time tracking
     "event_log": [],
     "starred_quizzes": [],
     "section_time": {},
@@ -80,7 +84,6 @@ for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# Training-state factory
 TS_DEF = lambda: {
     "processed": False, "assessment_ready": False, "quiz_data": None,
     "exam_data": None, "exam_type": None, "summary_data": None,
@@ -90,7 +93,6 @@ TS_DEF = lambda: {
 if "training_state" not in st.session_state:
     st.session_state["training_state"] = TS_DEF()
 
-# Lesson progress
 if "lesson_progress" not in st.session_state:
     lp = {}
     for c in COURSES:
@@ -133,11 +135,9 @@ def log_event(event: str, detail: str = "") -> None:
         "detail": detail,
     })
 
-
 def enter_section(name: str) -> None:
     st.session_state["section_enter_ts"][name] = datetime.datetime.now()
     log_event("enter_section", name)
-
 
 def leave_section(name: str) -> None:
     enter = st.session_state["section_enter_ts"].get(name)
@@ -164,15 +164,12 @@ if st.session_state["last_login_date"] != today:
 def course_progress_pct(code: str) -> int:
     return _course_progress_pct(code)
 
-
 def sync_rate() -> int:
     return int(sum(course_progress_pct(c["code"]) for c in COURSES) / len(COURSES))
-
 
 def reset_training() -> None:
     st.session_state["active_training"] = None
     st.session_state["training_state"]  = TS_DEF()
-
 
 def reset_course() -> None:
     st.session_state["active_course"] = None
@@ -184,9 +181,10 @@ def reset_course() -> None:
 if not st.session_state["logged_in"]:
     st.markdown("""
     <div style="text-align:center;padding:70px 0 24px;">
-        <div style="font-size:54px;margin-bottom:14px;">🎓</div>
+        <div style="font-size:54px;margin-bottom:14px;">🧠</div>
         <h1 class="grad" style="font-size:3rem;margin:0;">CogniLearn Enterprise</h1>
-        <p style="color:#6b6860;font-size:1.1rem;margin-top:10px;">AI-Powered Learning & Assessment Platform</p>
+        <p style="color:#6b6860;font-size:1.1rem;margin-top:10px;">AI-Based Cognitive Learning Pattern Analyzer</p>
+        <p style="color:#9090a8;font-size:0.9rem;">Behavioral Analysis · Pattern Classification · Adaptive Recommendations</p>
     </div>""", unsafe_allow_html=True)
 
     col1, col2, col3 = st.columns([1, 1.4, 1])
@@ -196,7 +194,7 @@ if not st.session_state["logged_in"]:
             with st.form("login"):
                 lid  = st.text_input("Registration Number", placeholder="43611162")
                 lpwd = st.text_input("Password", type="password", placeholder="••••••")
-                if st.form_submit_button("Access Portal →", width="stretch", type="primary"):
+                if st.form_submit_button("Access Portal →", use_container_width=True, type="primary"):
                     db = st.session_state["users_db"]
                     if lid in db and db[lid]["password"] == lpwd:
                         st.session_state["logged_in"]    = True
@@ -215,7 +213,7 @@ if not st.session_state["logged_in"]:
                 ryr  = st.selectbox("Year", ["1st Year", "2nd Year", "3rd Year", "4th Year"])
             rsc  = st.selectbox("School", list(SCHOOLS_PROGRAMS.keys()))
             rpr  = st.selectbox("Program", SCHOOLS_PROGRAMS[rsc])
-            if st.button("Create Account", width="stretch", type="primary"):
+            if st.button("Create Account", use_container_width=True, type="primary"):
                 if rid and rn and rpwd:
                     st.session_state["users_db"][rid] = {
                         "name": rn, "password": rpwd, "degree": rdeg, "year": ryr,
@@ -226,7 +224,6 @@ if not st.session_state["logged_in"]:
                     st.error("Fill all required fields.")
     st.stop()
 
-# Safety guard
 if st.session_state["current_user"] is None:
     st.session_state["logged_in"] = False
     st.rerun()
@@ -261,6 +258,23 @@ with st.sidebar:
         f'<div class="streak-box" style="margin:8px 0;">🔥 {streak} day streak</div>',
         unsafe_allow_html=True,
     )
+
+    # Live cognitive pattern badge in sidebar
+    qhist    = st.session_state.get("quiz_history", [])
+    retry_mp = st.session_state.get("quiz_retry_count", {})
+    if qhist:
+        feats   = compute_behavioral_features(qhist, retry_mp)
+        pattern = classify_cognitive_pattern(feats)
+        pinfo   = COGNITIVE_PATTERNS.get(pattern, {})
+        pc      = pinfo.get("color", "#4f46e5")
+        picon   = pinfo.get("icon",  "🧠")
+        st.markdown(
+            f'<div style="background:{pc}22;border:1px solid {pc};border-radius:10px;'
+            f'padding:8px 14px;margin:8px 0;font-size:12px;font-weight:700;color:{pc};">'
+            f'{picon} {pattern}</div>',
+            unsafe_allow_html=True,
+        )
+
     st.divider()
 
     api_key = st.text_input(
@@ -268,16 +282,14 @@ with st.sidebar:
         help="Optional: enables Claude AI quiz/exam generation. Falls back to local NLP without it.",
     )
     if api_key:
-        st.markdown('<div style="color:#86efac;font-size:12px;margin-top:-8px;margin-bottom:8px;">✓ Claude AI enabled</div>',
-                    unsafe_allow_html=True)
+        st.markdown('<div style="color:#86efac;font-size:12px;margin-top:-8px;margin-bottom:8px;">✓ Claude AI enabled</div>', unsafe_allow_html=True)
     else:
-        st.markdown('<div style="color:#fbbf24;font-size:12px;margin-top:-8px;margin-bottom:8px;">📝 Using local NLP (no key needed)</div>',
-                    unsafe_allow_html=True)
+        st.markdown('<div style="color:#fbbf24;font-size:12px;margin-top:-8px;margin-bottom:8px;">📝 Using local NLP (no key needed)</div>', unsafe_allow_html=True)
 
     st.divider()
 
     dm_label = "☀️ Light Mode" if T["DM"] else "🌙 Dark Mode"
-    if st.button(dm_label, width="stretch"):
+    if st.button(dm_label, use_container_width=True):
         st.session_state["dark_mode"] = not st.session_state["dark_mode"]
         st.rerun()
 
@@ -301,7 +313,7 @@ with st.sidebar:
             </div>
         </div>""", unsafe_allow_html=True)
 
-    if st.button("Sign Out", width="stretch"):
+    if st.button("Sign Out", use_container_width=True):
         st.session_state["logged_in"] = False
         st.rerun()
 
@@ -322,7 +334,7 @@ if "Student" in app_mode:
                 unsafe_allow_html=True,
             )
             st.markdown(
-                f"<p style='color:{CLR_SUB};margin-bottom:26px;'>Your AI-powered learning command centre.</p>",
+                f"<p style='color:{CLR_SUB};margin-bottom:26px;'>AI-powered learning with real-time cognitive pattern analysis.</p>",
                 unsafe_allow_html=True,
             )
 
@@ -336,6 +348,25 @@ if "Student" in app_mode:
                 sum(lp.values())
                 for lp in [st.session_state["lesson_progress"][c["code"]] for c in COURSES]
             )
+
+            # Show cognitive pattern on hub
+            qhist_hub = st.session_state.get("quiz_history", [])
+            retry_hub = st.session_state.get("quiz_retry_count", {})
+            if qhist_hub:
+                feats_hub   = compute_behavioral_features(qhist_hub, retry_hub)
+                pattern_hub = classify_cognitive_pattern(feats_hub)
+                pinfo_hub   = COGNITIVE_PATTERNS.get(pattern_hub, {})
+                pc_hub      = pinfo_hub.get("color", "#4f46e5")
+                picon_hub   = pinfo_hub.get("icon", "🧠")
+                st.markdown(f"""
+                <div style="background:{pc_hub}11;border:1.5px solid {pc_hub};border-radius:12px;padding:14px 20px;margin-bottom:20px;display:flex;align-items:center;gap:14px;">
+                    <div style="font-size:32px;">{picon_hub}</div>
+                    <div>
+                        <div style="font-size:11px;font-weight:700;letter-spacing:1.5px;color:{pc_hub};text-transform:uppercase;">Your Cognitive Learning Pattern</div>
+                        <div style="font-size:18px;font-weight:800;color:{CLR_TEXT};">{pattern_hub}</div>
+                        <div style="font-size:12px;color:{CLR_SUB};">{pinfo_hub.get('desc','')}</div>
+                    </div>
+                </div>""", unsafe_allow_html=True)
 
             c1, c2, c3, c4 = st.columns(4)
             for col, (title, val, cls) in zip([c1, c2, c3, c4], [
@@ -351,8 +382,7 @@ if "Student" in app_mode:
                         <div style="font-size:2rem;font-weight:800;font-family:'Literata',serif;color:{CLR_TEXT};margin-top:6px;">{val}</div>
                     </div>""", unsafe_allow_html=True)
 
-            st.markdown(f"<h3 style='margin:26px 0 14px;color:{CLR_TEXT};'>Recent Courses</h3>",
-                        unsafe_allow_html=True)
+            st.markdown(f"<h3 style='margin:26px 0 14px;color:{CLR_TEXT};'>Recent Courses</h3>", unsafe_allow_html=True)
             cols = st.columns(3)
             for idx, c in enumerate(COURSES[:3]):
                 p = course_progress_pct(c["code"])
@@ -369,18 +399,17 @@ if "Student" in app_mode:
                             <div style="font-size:11px;color:{CLR_SUB};margin-top:5px;font-weight:600;">{p}% complete</div>
                         </div>
                     </div>""", unsafe_allow_html=True)
-                    if st.button("Open →", key=f"dash_{c['code']}", width="stretch"):
+                    if st.button("Open →", key=f"dash_{c['code']}", use_container_width=True):
                         st.session_state["active_course"] = c["code"]
                         st.rerun()
 
-            st.markdown(f"<h3 style='margin:26px 0 14px;color:{CLR_TEXT};'>All Courses Overview</h3>",
-                        unsafe_allow_html=True)
+            st.markdown(f"<h3 style='margin:26px 0 14px;color:{CLR_TEXT};'>All Courses Overview</h3>", unsafe_allow_html=True)
             all_cols = st.columns(3)
             for idx, c in enumerate(COURSES[3:]):
                 p = course_progress_pct(c["code"])
                 with all_cols[idx]:
                     st.markdown(f"""
-                    <div style="border-radius:14px;overflow:hidden;background:{BG_CARD};border:1px solid {CLR_BORDER};box-shadow:0 2px 8px rgba(0,0,0,0.05);margin-bottom:8px;">
+                    <div style="border-radius:14px;overflow:hidden;background:{BG_CARD};border:1px solid {CLR_BORDER};margin-bottom:8px;">
                         <div style="height:62px;background:{c['bg']};"></div>
                         <div style="padding:12px 16px;">
                             <div style="color:{CLR_TEXT};font-size:12px;font-weight:700;">{c['code']}</div>
@@ -390,7 +419,7 @@ if "Student" in app_mode:
                             <div style="font-size:11px;color:{CLR_SUB};">{p}%</div>
                         </div>
                     </div>""", unsafe_allow_html=True)
-                    if st.button("Open →", key=f"dash2_{c['code']}", width="stretch"):
+                    if st.button("Open →", key=f"dash2_{c['code']}", use_container_width=True):
                         st.session_state["active_course"] = c["code"]
                         st.rerun()
         else:
@@ -420,7 +449,7 @@ if "Student" in app_mode:
                             <div style="font-size:11px;color:{CLR_SUB};margin-top:5px;">{p}% complete</div>
                         </div>
                     </div>""", unsafe_allow_html=True)
-                    if st.button("Enter Course →", key=f"lib_{c['code']}", width="stretch"):
+                    if st.button("Enter Course →", key=f"lib_{c['code']}", use_container_width=True):
                         st.session_state["active_course"] = c["code"]
                         st.rerun()
         else:
@@ -434,7 +463,7 @@ if "Student" in app_mode:
             st.markdown(f"<h1 style='color:{CLR_TEXT};'>Assessment Generator</h1>", unsafe_allow_html=True)
             st.markdown(
                 f"<p style='color:{CLR_SUB};margin-bottom:26px;'>Upload your study materials → AI extracts knowledge → Generates custom quizzes & exam papers.<br>"
-                "Works <strong>without an API key</strong> using local NLP, or with <strong>Claude AI</strong> for smarter results.</p>",
+                "All quiz attempts are analyzed to build your <strong>Cognitive Learning Pattern</strong>.</p>",
                 unsafe_allow_html=True,
             )
             cols = st.columns(3)
@@ -453,7 +482,7 @@ if "Student" in app_mode:
                             <span style="color:{CLR_SUB};font-size:12px;"> on completion</span>
                         </div>
                     </div>""", unsafe_allow_html=True)
-                    if st.button("Start Workspace", key=f"start_{ex['id']}", width="stretch", type="primary"):
+                    if st.button("Start Workspace", key=f"start_{ex['id']}", use_container_width=True, type="primary"):
                         st.session_state["active_training"] = ex["id"]
                         st.rerun()
         else:
@@ -465,11 +494,10 @@ if "Student" in app_mode:
                 <h2 style="color:#fff;margin:0;font-family:'Literata',serif;">{ex['icon']} {ex['title']} Workspace</h2>
                 <div style="color:rgba(255,255,255,.8);font-size:14px;margin-top:6px;">{ex['subtitle']} · +{ex['xp']} XP on completion</div>
                 <div style="margin-top:8px;font-size:12px;color:rgba(255,255,255,.7);">
-                    {'✨ Claude AI active — high-quality generation' if api_key else '📝 Local NLP mode — no API key needed'}
+                    {'✨ Claude AI active — high-quality generation' if api_key else '📝 Local NLP mode — no API key needed'} · 🧠 Behavioral data is collected for pattern analysis
                 </div>
             </div>""", unsafe_allow_html=True)
 
-            # Step 1 – Upload
             st.markdown("### 📥 Step 1: Upload Study Materials")
             uploaded_files = st.file_uploader(
                 "Upload files (PDF, DOCX, TXT, PPTX)",
@@ -480,7 +508,7 @@ if "Student" in app_mode:
                 st.success(f"✓ {len(uploaded_files)} file(s) loaded.")
 
                 if not ts["processed"]:
-                    if st.button("🧠 Extract Knowledge", type="primary", width="stretch"):
+                    if st.button("🧠 Extract Knowledge", type="primary", use_container_width=True):
                         with st.spinner("Reading and understanding your documents…"):
                             texts = [extract_text(f) for f in uploaded_files]
                             sdata = ai_summarize(texts, ex["subtitle"], api_key) if api_key else None
@@ -491,7 +519,6 @@ if "Student" in app_mode:
                         ts["processed"]    = True
                         st.rerun()
 
-                # Step 2 – Summary
                 if ts["processed"]:
                     st.markdown("### 🧠 Step 2: Knowledge Extraction Results")
                     if ts.get("summary_data"):
@@ -502,10 +529,7 @@ if "Student" in app_mode:
                             <div style="font-size:13px;color:{CLR_SUB};margin-top:4px;">Extracted from {len(uploaded_files)} file(s)</div>
                         </div>""", unsafe_allow_html=True)
                         render_summary(ts["summary_data"], T, ex["color"])
-                    else:
-                        st.warning("No summary available.")
 
-                    # Step 3 – Configure
                     if not ts["assessment_ready"]:
                         st.markdown("### 📝 Step 3: Configure & Generate Assessment")
                         exam_type = st.radio(
@@ -524,7 +548,7 @@ if "Student" in app_mode:
                             with cB: n16m = st.number_input("Part B – 16-Mark Qs", 1, 5, 3)
                             with cC: diff = st.selectbox("Difficulty", ["Easy", "Medium", "Hard"])
 
-                        if st.button("🚀 Generate Assessment", type="primary", width="stretch"):
+                        if st.button("🚀 Generate Assessment", type="primary", use_container_width=True):
                             with st.spinner("Crafting your personalised assessment…"):
                                 ftexts = ts.get("file_texts", [""])
                                 if "Quiz" in exam_type:
@@ -543,7 +567,6 @@ if "Student" in app_mode:
                                 ts["assessment_ready"] = True
                             st.rerun()
 
-                    # Step 4 – Render
                     if ts["assessment_ready"] and not ts.get("submitted"):
                         st.divider()
                         if "Quiz" in ts.get("exam_type", ""):
@@ -562,21 +585,20 @@ if "Student" in app_mode:
                                 with cA2:
                                     st.info("💡 Use Ctrl+P / Cmd+P to print / save as PDF.")
                                 with cB2:
-                                    if st.button(f"✅ Submit & Claim {ex['xp']} XP", type="primary", width="stretch"):
+                                    if st.button(f"✅ Submit & Claim {ex['xp']} XP", type="primary", use_container_width=True):
                                         st.session_state["global_xp"] += ex["xp"]
                                         ts["submitted"] = True
                                         st.rerun()
                             else:
                                 st.error("Exam paper generation failed.")
 
-                    # Results
                     if ts.get("submitted"):
                         if ts.get("quiz_responses"):
                             render_quiz_results(ts["quiz_responses"], ex["subtitle"], api_key, sync_rate(), T)
                         else:
                             st.success(f"✅ Exam submitted! +{ex['xp']} XP claimed!")
                             st.balloons()
-                        if st.button("← Start New Assessment", width="stretch"):
+                        if st.button("← Start New Assessment", use_container_width=True):
                             reset_training()
                             st.rerun()
 
@@ -595,6 +617,10 @@ if "Student" in app_mode:
         sec_time      = st.session_state.get("section_time", {})
         retry_map     = st.session_state.get("quiz_retry_count", {})
         starred_q     = st.session_state.get("starred_quizzes", [])
+
+        # Compute pattern for this tab
+        features_tab = compute_behavioral_features(qhist, retry_map)
+        pattern_tab  = classify_cognitive_pattern(features_tab)
 
         # KPIs
         kpi_cols = st.columns(6)
@@ -616,9 +642,13 @@ if "Student" in app_mode:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        at1, at2, at3, at4, at5 = st.tabs([
-            "📊 Overview", "⏱ Time Spent", "🎯 Quiz Deep-Dive",
-            "🔁 Retries & Frequency", "🤖 Aggregated Scores",
+        at1, at2, at3, at4, at5, at6 = st.tabs([
+            "📊 Overview",
+            "🧠 Behavioral Analysis",
+            "🎯 Adaptive Recommendations",
+            "📈 Improvement Report",
+            "🎯 Quiz Deep-Dive",
+            "🤖 Aggregated Scores",
         ])
 
         # ── Tab 1: Overview ──
@@ -642,7 +672,7 @@ if "Student" in app_mode:
                     xaxis=dict(range=[0,100], tickfont=dict(color=CLR_SUB), gridcolor=CLR_SOFT, ticksuffix="%"),
                     yaxis=dict(tickfont=dict(color=CLR_TEXT, size=12)),
                     legend=dict(font=dict(color=CLR_SUB)), font=dict(color=CLR_TEXT))
-                st.plotly_chart(fig_bar, width="stretch")
+                st.plotly_chart(fig_bar, use_container_width=True)
 
             with col_r:
                 st.markdown("#### Aptitude Radar")
@@ -662,64 +692,22 @@ if "Student" in app_mode:
                                angularaxis=dict(tickfont=dict(color=CLR_TEXT, size=11), gridcolor=CLR_BORDER),
                                bgcolor="rgba(0,0,0,0)"),
                     paper_bgcolor="rgba(0,0,0,0)", height=300, margin=dict(t=20,b=20,l=30,r=30))
-                st.plotly_chart(fig_r, width="stretch")
+                st.plotly_chart(fig_r, use_container_width=True)
 
-            if starred_q:
-                st.markdown("#### ⭐ Starred Quizzes")
-                for sq_item in starred_q:
-                    st.markdown(f'<span class="summary-tag">⭐ {sq_item}</span>', unsafe_allow_html=True)
-
-        # ── Tab 2: Time Spent ──
+        # ── Tab 2: BEHAVIORAL ANALYSIS (NEW CORE FEATURE) ──
         with at2:
-            st.markdown("#### ⏱ Time Spent by Section")
-            live_time = {}
-            for sname, enter in st.session_state.get("section_enter_ts", {}).items():
-                live_time[sname] = (datetime.datetime.now() - enter).total_seconds()
+            render_behavioral_analytics(qhist, retry_map, overall, T)
 
-            combined_time = dict(sec_time)
-            for k, v in live_time.items():
-                combined_time[k] = combined_time.get(k, 0) + v
-
-            if combined_time:
-                time_rows = [
-                    {"Section": s.replace("_", " ").title(), "Minutes": round(v/60, 2), "Seconds": int(v)}
-                    for s, v in combined_time.items()
-                ]
-                df_time = pd.DataFrame(time_rows).sort_values("Minutes", ascending=False)
-                tc1, tc2 = st.columns([3, 2])
-                with tc1:
-                    fig_time = go.Figure(go.Bar(
-                        x=df_time["Minutes"], y=df_time["Section"],
-                        orientation="h", marker_color="#4f46e5",
-                        text=[f"{m:.1f} min" for m in df_time["Minutes"]],
-                        textposition="outside"))
-                    fig_time.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                        height=max(220, len(df_time)*44), margin=dict(l=10,r=50,t=20,b=10),
-                        xaxis=dict(title="Minutes", tickfont=dict(color=CLR_SUB), gridcolor=CLR_SOFT),
-                        yaxis=dict(tickfont=dict(color=CLR_TEXT, size=12)),
-                        font=dict(color=CLR_TEXT))
-                    st.plotly_chart(fig_time, width="stretch")
-                with tc2:
-                    fig_pie = go.Figure(go.Pie(
-                        labels=df_time["Section"], values=df_time["Minutes"],
-                        hole=0.45, textinfo="label+percent",
-                        marker=dict(colors=["#4f46e5","#0ea5e9","#10b981","#f59e0b","#ef4444","#8b5cf6"]),
-                        textfont=dict(size=11)))
-                    fig_pie.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=300,
-                        margin=dict(t=10,b=10,l=10,r=10),
-                        legend=dict(font=dict(color=CLR_TEXT, size=11)))
-                    st.plotly_chart(fig_pie, width="stretch")
-            else:
-                st.info("Time tracking begins as you navigate the platform.")
-
-            ev_log = st.session_state.get("event_log", [])
-            if ev_log:
-                with st.expander("📋 Full Event Log"):
-                    df_ev = pd.DataFrame(ev_log[-50:][::-1])
-                    st.dataframe(df_ev, width="stretch", height=280)
-
-        # ── Tab 3: Quiz Deep-Dive ──
+        # ── Tab 3: ADAPTIVE RECOMMENDATIONS (NEW CORE FEATURE) ──
         with at3:
+            render_adaptive_recommendations(qhist, retry_map, overall, api_key, T)
+
+        # ── Tab 4: IMPROVEMENT REPORT (NEW CORE FEATURE) ──
+        with at4:
+            render_improvement_report(qhist, retry_map, overall, T)
+
+        # ── Tab 5: Quiz Deep-Dive ──
+        with at5:
             if not qhist:
                 st.info("📊 Complete a quiz in Brain Training to unlock performance analytics.")
             else:
@@ -742,11 +730,6 @@ if "Student" in app_mode:
                     text=[f"{s:.0f}%" for s in df_q["Score"]],
                     textposition="top center", textfont=dict(color=CLR_TEXT, size=12),
                     fill="tozeroy", fillcolor="rgba(79,70,229,0.08)"))
-                fig_l.add_trace(go.Scatter(
-                    x=df_q["Attempt"], y=df_q["Correct"],
-                    mode="lines+markers", name="Correct", yaxis="y2",
-                    line=dict(color="#10b981", width=2, dash="dot"),
-                    marker=dict(size=7, color="#10b981")))
                 fig_l.add_hline(y=70, line_dash="dash", line_color="#f59e0b",
                                 annotation_text="Pass line (70%)", annotation_font_color="#d97706")
                 fig_l.update_layout(
@@ -754,103 +737,14 @@ if "Student" in app_mode:
                     height=320, margin=dict(l=0,r=50,t=20,b=10),
                     xaxis=dict(title="Attempt #", tickfont=dict(color=CLR_SUB), gridcolor=CLR_SOFT),
                     yaxis=dict(title="Score %", range=[0,105], tickfont=dict(color=CLR_SUB), gridcolor=CLR_SOFT),
-                    yaxis2=dict(title="Correct Qs", overlaying="y", side="right",
-                                tickfont=dict(color="#10b981"), showgrid=False),
                     legend=dict(font=dict(color=CLR_SUB)), font=dict(color=CLR_TEXT))
-                st.plotly_chart(fig_l, width="stretch")
-
-                st.markdown("#### ✅ Correct vs ❌ Wrong per Attempt")
-                fig_cw = go.Figure()
-                fig_cw.add_trace(go.Bar(x=df_q["Attempt"], y=df_q["Correct"], name="Correct", marker_color="#10b981"))
-                fig_cw.add_trace(go.Bar(x=df_q["Attempt"], y=df_q["Wrong"],   name="Wrong",   marker_color="#ef4444"))
-                fig_cw.update_layout(barmode="stack", paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)", height=260, margin=dict(l=0,r=0,t=10,b=10),
-                    xaxis=dict(title="Attempt #", tickfont=dict(color=CLR_SUB), gridcolor=CLR_SOFT),
-                    yaxis=dict(title="Questions", tickfont=dict(color=CLR_SUB), gridcolor=CLR_SOFT),
-                    legend=dict(font=dict(color=CLR_SUB)), font=dict(color=CLR_TEXT))
-                st.plotly_chart(fig_cw, width="stretch")
+                st.plotly_chart(fig_l, use_container_width=True)
 
                 with st.expander("📋 Detailed Quiz Log"):
-                    st.dataframe(df_q, width="stretch", height=240)
+                    st.dataframe(df_q, use_container_width=True, height=240)
 
-        # ── Tab 4: Retries & Answer Frequency ──
-        with at4:
-            st.markdown("#### 🔁 Quiz Retry Frequency per Subject")
-            if retry_map:
-                df_retry = pd.DataFrame(
-                    [{"Subject": k, "Attempts": v} for k, v in retry_map.items()]
-                ).sort_values("Attempts", ascending=False)
-                fig_ret = go.Figure(go.Bar(
-                    x=df_retry["Attempts"], y=df_retry["Subject"],
-                    orientation="h", marker_color="#f59e0b",
-                    text=df_retry["Attempts"], textposition="outside"))
-                fig_ret.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    height=max(200, len(df_retry)*46), margin=dict(l=10,r=50,t=10,b=10),
-                    xaxis=dict(title="Times Attempted", tickfont=dict(color=CLR_SUB), gridcolor=CLR_SOFT),
-                    yaxis=dict(tickfont=dict(color=CLR_TEXT)), font=dict(color=CLR_TEXT))
-                st.plotly_chart(fig_ret, width="stretch")
-            else:
-                st.info("Attempt quizzes multiple times to see retry trends.")
-
-            st.markdown("#### 🎯 Cumulative Answer Accuracy")
-            if qhist:
-                rc1, rc2, rc3 = st.columns(3)
-                with rc1:
-                    fig_donut = go.Figure(go.Pie(
-                        labels=["Correct", "Wrong"],
-                        values=[total_correct, max(1, total_wrong)],
-                        hole=0.55, textinfo="label+percent",
-                        marker=dict(colors=["#10b981","#ef4444"]),
-                        textfont=dict(size=13)))
-                    fig_donut.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=260,
-                        margin=dict(t=10,b=10,l=10,r=10),
-                        annotations=[dict(text=f"{total_correct+total_wrong}<br>Total",
-                                         showarrow=False, font=dict(color=CLR_TEXT, size=14))])
-                    st.plotly_chart(fig_donut, width="stretch")
-                with rc2:
-                    diff_map = collections.defaultdict(lambda: {"c":0,"w":0})
-                    for q in qhist:
-                        diff_map[q.get("difficulty","Medium")]["c"] += q.get("correct",0)
-                        diff_map[q.get("difficulty","Medium")]["w"] += q.get("wrong",q["total"]-q.get("correct",0))
-                    d_names = list(diff_map.keys())
-                    fig_diff = go.Figure()
-                    fig_diff.add_trace(go.Bar(name="Correct", x=d_names,
-                        y=[diff_map[d]["c"] for d in d_names], marker_color="#10b981"))
-                    fig_diff.add_trace(go.Bar(name="Wrong", x=d_names,
-                        y=[diff_map[d]["w"] for d in d_names], marker_color="#ef4444"))
-                    fig_diff.update_layout(barmode="group", paper_bgcolor="rgba(0,0,0,0)",
-                        plot_bgcolor="rgba(0,0,0,0)", height=260, margin=dict(l=0,r=0,t=20,b=10),
-                        title=dict(text="By Difficulty", font=dict(color=CLR_TEXT,size=13)),
-                        legend=dict(font=dict(color=CLR_SUB)), font=dict(color=CLR_TEXT),
-                        xaxis=dict(tickfont=dict(color=CLR_TEXT)),
-                        yaxis=dict(tickfont=dict(color=CLR_SUB), gridcolor=CLR_SOFT))
-                    st.plotly_chart(fig_diff, width="stretch")
-                with rc3:
-                    topic_acc = collections.defaultdict(lambda: {"c":0,"t":0})
-                    for q in qhist:
-                        for r in q.get("responses",{}).values():
-                            tp = r.get("topic","General")[:22]
-                            topic_acc[tp]["t"] += 1
-                            if r.get("correct"):
-                                topic_acc[tp]["c"] += 1
-                    if topic_acc:
-                        top_topics = sorted(topic_acc.items(), key=lambda x: x[1]["t"], reverse=True)[:8]
-                        t_names = [t[0] for t in top_topics]
-                        t_pcts  = [t[1]["c"]/t[1]["t"]*100 if t[1]["t"] else 0 for t in top_topics]
-                        colors  = ["#10b981" if p>=70 else "#f59e0b" if p>=40 else "#ef4444" for p in t_pcts]
-                        fig_top = go.Figure(go.Bar(
-                            x=t_pcts, y=t_names, orientation="h",
-                            marker_color=colors, text=[f"{p:.0f}%" for p in t_pcts], textposition="outside"))
-                        fig_top.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                            height=260, margin=dict(l=10,r=50,t=20,b=10),
-                            title=dict(text="Topic Accuracy", font=dict(color=CLR_TEXT,size=13)),
-                            xaxis=dict(range=[0,115], ticksuffix="%", tickfont=dict(color=CLR_SUB)),
-                            yaxis=dict(tickfont=dict(color=CLR_TEXT, size=10)),
-                            font=dict(color=CLR_TEXT))
-                        st.plotly_chart(fig_top, width="stretch")
-
-        # ── Tab 5: Aggregated Scores ──
-        with at5:
+        # ── Tab 6: Aggregated Scores ──
+        with at6:
             st.markdown("#### 🤖 Aggregated Score Analysis with StandardScaler Normalisation")
             if not qhist:
                 st.info("Complete at least one quiz to see aggregated score analysis.")
@@ -876,16 +770,10 @@ if "Student" in app_mode:
                     agg1, agg2 = st.columns(2)
                     with agg1:
                         st.markdown("**Raw Score Statistics**")
-                        st.dataframe(df_num.describe().round(2).T.rename(columns={
-                            "count":"N","mean":"Mean","std":"Std","min":"Min",
-                            "25%":"Q1","50%":"Median","75%":"Q3","max":"Max"}),
-                            width="stretch", height=240)
+                        st.dataframe(df_num.describe().round(2).T, use_container_width=True, height=240)
                     with agg2:
                         st.markdown("**StandardScaler Z-Score Statistics**")
-                        st.dataframe(df_scaled.describe().round(3).T.rename(columns={
-                            "count":"N","mean":"Mean","std":"Std","min":"Min",
-                            "25%":"Q1","50%":"Median","75%":"Q3","max":"Max"}),
-                            width="stretch", height=240)
+                        st.dataframe(df_scaled.describe().round(3).T, use_container_width=True, height=240)
 
                     st.markdown("#### Z-Score Heatmap (per Attempt)")
                     df_heat       = df_scaled.copy()
@@ -900,70 +788,7 @@ if "Student" in app_mode:
                         xaxis=dict(tickfont=dict(color=CLR_TEXT,size=11)),
                         yaxis=dict(tickfont=dict(color=CLR_TEXT,size=11)),
                         font=dict(color=CLR_TEXT))
-                    st.plotly_chart(fig_heat, width="stretch")
-
-                    raw_scores   = df_raw["Score"].values
-                    weighted_avg = float(np.average(raw_scores, weights=np.arange(1, len(raw_scores)+1)))
-                    d_mult       = {"Easy":1.0,"Medium":1.5,"Hard":2.0}
-                    w_scores     = np.array([q["score"] * d_mult.get(q.get("difficulty","Medium"), 1.0) for q in qhist])
-                    final_agg    = float(np.clip(np.mean(w_scores), 0, 100))
-
-                    fa1, fa2, fa3 = st.columns(3)
-                    for fcol, (ftitle, fval, fcls) in zip([fa1, fa2, fa3], [
-                        ("Simple Average",       f"{np.mean(raw_scores):.1f}%", "indigo"),
-                        ("Recency-Weighted Avg",  f"{weighted_avg:.1f}%",       "green"),
-                        ("Difficulty-Weighted",   f"{final_agg:.1f}%",          "amber"),
-                    ]):
-                        with fcol:
-                            st.markdown(f"""
-                            <div class="metric-card {fcls}" style="text-align:center;padding:22px 16px;">
-                                <div style="font-size:10px;color:{CLR_SUB};font-weight:700;
-                                            letter-spacing:1px;text-transform:uppercase;">{ftitle}</div>
-                                <div style="font-size:2.2rem;font-weight:800;color:{CLR_TEXT};
-                                            margin-top:8px;font-family:'Literata',serif;">{fval}</div>
-                            </div>""", unsafe_allow_html=True)
-
-                    st.markdown("#### 📡 Performance Profile (Mean |Z-Score|)")
-                    z_means = np.abs(scaled_arr).mean(axis=0).tolist()
-                    fig_zr  = go.Figure(go.Scatterpolar(
-                        r=z_means+[z_means[0]], theta=num_feat+[num_feat[0]],
-                        fill="toself", fillcolor="rgba(16,185,129,0.15)",
-                        line=dict(color="#10b981", width=2.5),
-                        marker=dict(color="#10b981", size=8)))
-                    fig_zr.update_layout(
-                        polar=dict(
-                            radialaxis=dict(visible=True, tickfont=dict(color=CLR_SUB, size=9), gridcolor=CLR_BORDER),
-                            angularaxis=dict(tickfont=dict(color=CLR_TEXT, size=11), gridcolor=CLR_BORDER),
-                            bgcolor="rgba(0,0,0,0)"),
-                        paper_bgcolor="rgba(0,0,0,0)", height=320, margin=dict(t=20,b=20,l=30,r=30))
-                    st.plotly_chart(fig_zr, width="stretch")
-
-                    if api_key:
-                        st.markdown("#### 🎯 AI Adaptive Recommendations")
-                        last = qhist[-1]
-                        with st.spinner("Generating personalised study plan…"):
-                            recs = ai_recommendations(last.get("responses",{}), overall, last.get("subject",""), api_key)
-                        if recs:
-                            rcols = st.columns(2)
-                            for ri, rec in enumerate(recs):
-                                pri = rec.get("priority","medium")
-                                pc  = {"high":"#ef4444","medium":"#f59e0b","low":"#22c55e"}.get(pri,"#4f46e5")
-                                pl  = {"high":"🔴 HIGH","medium":"🟡 MED","low":"🟢 LOW"}.get(pri,"⚪")
-                                with rcols[ri % 2]:
-                                    st.markdown(f"""
-                                    <div class="rec-card rec-{pri[:3]}">
-                                        <div style="display:flex;justify-content:space-between;margin-bottom:8px;">
-                                            <div style="font-weight:700;font-size:14px;">{rec.get('title','')}</div>
-                                            <span style="font-size:11px;font-weight:700;color:{pc};">{pl}</span>
-                                        </div>
-                                        <div style="font-size:13px;line-height:1.6;">{rec.get('description','')}</div>
-                                        <div style="background:{BG_CARD2};border-radius:8px;padding:8px 12px;margin-top:8px;">
-                                            <div style="font-size:12px;color:#4f46e5;">⚡ {rec.get('action','')}</div>
-                                            <div style="font-size:12px;color:{pc};font-weight:600;">⏱ {rec.get('time_est','')} · 📈 {rec.get('impact','')}</div>
-                                        </div>
-                                    </div>""", unsafe_allow_html=True)
-                    else:
-                        st.info("Enter your Anthropic API key in the sidebar to unlock AI adaptive recommendations.")
+                    st.plotly_chart(fig_heat, use_container_width=True)
                 else:
                     st.info("Complete at least 2 quizzes for statistical analysis.")
 
@@ -973,33 +798,43 @@ if "Student" in app_mode:
 
 elif "Analytics" in app_mode:
     st.markdown("<h1 class='grad' style='text-align:center;'>🤖 AI Research Laboratory</h1>", unsafe_allow_html=True)
-    st.markdown(f"<p style='text-align:center;color:{CLR_SUB};margin-bottom:28px;'>Upload a student dataset or synthesise one to explore ML-driven analytics.</p>",
-                unsafe_allow_html=True)
+    st.markdown(f"<p style='text-align:center;color:{CLR_SUB};margin-bottom:28px;'>Upload a student dataset or synthesise one to explore ML-driven cognitive pattern analytics.</p>", unsafe_allow_html=True)
 
     cU, cS = st.columns(2)
     with cU:
         up_file = st.file_uploader("Upload Student Dataset (CSV)", type=["csv"])
     with cS:
         st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
-        st.write("No CSV? Generate a synthetic dataset:")
-        if st.button("🧬 Synthesise Enterprise Dataset (5 000 Records)", width="stretch", type="primary"):
+        st.write("No CSV? Generate a synthetic dataset with behavioral features:")
+        if st.button("🧬 Synthesise Enterprise Dataset (5 000 Records)", use_container_width=True, type="primary"):
             with st.spinner("Generating…"):
                 np.random.seed(42); n = 5000
                 sh     = np.random.normal(15, 5, n).clip(2, 35)
                 sl     = np.random.normal(7, 1.5, n).clip(4, 10)
                 stress = np.random.uniform(1, 10, n)
                 pr     = np.random.uniform(40, 100, n)
-                sc     = (70 + sh*2 - stress*2.5 + sl*1.5 + np.random.normal(0, 8, n)).clip(0, 100)
+                # Response time: inverse of study hours (more study = faster)
+                resp_t = np.random.normal(60, 20, n).clip(15, 180) - sh * 1.5
+                resp_t = resp_t.clip(15, 150)
+                # Mistake frequency
+                mistake_f = np.random.beta(2, 5, n)
+                mistake_f = (mistake_f + stress * 0.03).clip(0.05, 0.95)
+                # Retry rate
+                retry_r = np.random.poisson(1.5, n).clip(1, 6).astype(float)
+                sc = (70 + sh*2 - stress*2.5 + sl*1.5 + np.random.normal(0, 8, n)).clip(0, 100)
                 df = pd.DataFrame({
                     "Student_ID":         [f"S{1000+i}" for i in range(n)],
                     "Study_Hours":        sh.round(1),
                     "Sleep_Hours":        sl.round(1),
                     "Stress_Level":       stress.round(1),
                     "Participation_Rate": pr.round(1),
+                    "Avg_Response_Time_s":resp_t.round(1),
+                    "Mistake_Frequency":  mistake_f.round(3),
+                    "Retry_Rate":         retry_r,
                     "Assessment_Score":   sc.round(1),
                 })
                 st.session_state["synth_data"] = df
-            st.success("✓ 5 000 records generated.")
+            st.success("✓ 5 000 records generated with behavioral features.")
 
     active_df = None
     if up_file:
@@ -1063,9 +898,9 @@ elif "Analytics" in app_mode:
             st.markdown("#### Descriptive Statistics")
             desc = df_ml[n_cols].describe().T.round(2)
             desc.columns = [c.title() for c in desc.columns]
-            st.dataframe(desc.style.background_gradient(cmap="Blues", subset=["Mean","Std"]), width="stretch")
+            st.dataframe(desc.style.background_gradient(cmap="Blues", subset=["Mean","Std"]), use_container_width=True)
             st.markdown("#### Raw Data (first 100 rows)")
-            st.dataframe(df_ml.head(100), width="stretch", height=380)
+            st.dataframe(df_ml.head(100), use_container_width=True, height=380)
 
         with t2:
             st.markdown("### Exploratory Data Analysis")
@@ -1075,9 +910,8 @@ elif "Analytics" in app_mode:
                 corr  = df_ml[n_cols].corr()
                 fig_h = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r",
                                   color_continuous_midpoint=0, aspect="auto")
-                fig_h.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    height=380, margin=dict(t=10,b=10,l=0,r=0), font=dict(color=CLR_TEXT))
-                st.plotly_chart(fig_h, width="stretch")
+                fig_h.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=380, margin=dict(t=10,b=10,l=0,r=0), font=dict(color=CLR_TEXT))
+                st.plotly_chart(fig_h, use_container_width=True)
             with c2:
                 st.markdown("#### Feature Distribution by Pattern")
                 feat  = st.selectbox("Select feature:", n_cols, key="eda_feat")
@@ -1085,10 +919,9 @@ elif "Analytics" in app_mode:
                                   color="Cognitive_Pattern", color_discrete_map=PAL, box=True, points="outliers")
                 fig_v.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                     showlegend=False, height=380, margin=dict(t=10,b=10,l=0,r=0),
-                    xaxis=dict(tickfont=dict(color=CLR_SUB), gridcolor=CLR_SOFT),
-                    yaxis=dict(tickfont=dict(color=CLR_SUB), gridcolor=CLR_SOFT),
+                    xaxis=dict(tickfont=dict(color=CLR_SUB)), yaxis=dict(tickfont=dict(color=CLR_SUB)),
                     font=dict(color=CLR_TEXT))
-                st.plotly_chart(fig_v, width="stretch")
+                st.plotly_chart(fig_v, use_container_width=True)
 
             st.markdown("#### Pair-wise Scatter Matrix")
             fig_sm = px.scatter_matrix(
@@ -1098,7 +931,7 @@ elif "Analytics" in app_mode:
             fig_sm.update_traces(marker=dict(size=3))
             fig_sm.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=540,
                 margin=dict(t=20,b=20,l=20,r=20), font=dict(color=CLR_TEXT, size=11))
-            st.plotly_chart(fig_sm, width="stretch")
+            st.plotly_chart(fig_sm, use_container_width=True)
 
             cA, cB = st.columns(2)
             with cA:
@@ -1141,7 +974,7 @@ elif "Analytics" in app_mode:
                     xaxis=dict(title="Correlation", tickfont=dict(color=CLR_SUB), gridcolor=CLR_SOFT,
                                range=[-1,1], zeroline=True, zerolinecolor=CLR_BORDER, zerolinewidth=2),
                     yaxis=dict(tickfont=dict(color=CLR_TEXT)), font=dict(color=CLR_TEXT))
-                st.plotly_chart(fig_cb, width="stretch")
+                st.plotly_chart(fig_cb, use_container_width=True)
 
         with t3:
             st.markdown("### 3D Cognitive Cluster Space (PCA Projection)")
@@ -1161,20 +994,7 @@ elif "Analytics" in app_mode:
                 legend=dict(font=dict(color=CLR_TEXT),
                             bgcolor="rgba(0,0,0,0.3)" if T["DM"] else "rgba(255,255,255,0.85)",
                             bordercolor=CLR_BORDER, borderwidth=1))
-            st.plotly_chart(fig3d, width="stretch")
-
-            st.markdown("#### 2D PCA View")
-            fig2d = px.scatter(sample, x="PCA_1", y="PCA_2",
-                color="Cognitive_Pattern", color_discrete_map=PAL,
-                hover_data=["Student_ID"], opacity=0.7,
-                labels={"PCA_1":"Principal Component 1","PCA_2":"Principal Component 2"})
-            fig2d.update_traces(marker=dict(size=5, line=dict(width=0.5, color="white")))
-            fig2d.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                height=420, margin=dict(t=10,b=0,l=0,r=0),
-                xaxis=dict(gridcolor=CLR_SOFT, tickfont=dict(color=CLR_SUB)),
-                yaxis=dict(gridcolor=CLR_SOFT, tickfont=dict(color=CLR_SUB)),
-                legend=dict(font=dict(color=CLR_TEXT)), font=dict(color=CLR_TEXT))
-            st.plotly_chart(fig2d, width="stretch")
+            st.plotly_chart(fig3d, use_container_width=True)
 
         with t4:
             st.markdown("### Machine Learning Engine")
@@ -1195,24 +1015,8 @@ elif "Analytics" in app_mode:
                 cm     = confusion_matrix(yte, prd)
                 fig_cm = px.imshow(cm, text_auto=True, color_continuous_scale="Blues",
                                    labels=dict(x="Predicted", y="Actual"))
-                fig_cm.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    height=310, margin=dict(t=10,b=10,l=0,r=0), font=dict(color=CLR_TEXT))
-                st.plotly_chart(fig_cm, width="stretch")
-
-                proba  = clf.predict_proba(Xte)
-                le_cls = LabelEncoder().fit(df_ml["Cognitive_Pattern"])
-                fig_pb = go.Figure()
-                for i, cls_name in enumerate(le_cls.classes_):
-                    fig_pb.add_trace(go.Box(y=proba[:, i], name=cls_name,
-                        marker_color=PAL.get(cls_name, "#4f46e5"),
-                        boxmean="sd", line_width=1.5))
-                fig_pb.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    height=280, margin=dict(t=20,b=0,l=0,r=0),
-                    title=dict(text="Prediction Probability Distribution", font=dict(size=13, color=CLR_TEXT)),
-                    xaxis=dict(tickfont=dict(color=CLR_SUB, size=10), gridcolor=CLR_SOFT),
-                    yaxis=dict(tickfont=dict(color=CLR_SUB), gridcolor=CLR_SOFT),
-                    showlegend=False, font=dict(color=CLR_TEXT))
-                st.plotly_chart(fig_pb, width="stretch")
+                fig_cm.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=310, margin=dict(t=10,b=10,l=0,r=0), font=dict(color=CLR_TEXT))
+                st.plotly_chart(fig_cm, use_container_width=True)
 
             with cR2:
                 st.markdown("#### 📈 Regression & Feature Importance")
@@ -1229,34 +1033,17 @@ elif "Analytics" in app_mode:
                 </div>""", unsafe_allow_html=True)
                 rf  = RandomForestClassifier(n_estimators=80, random_state=42).fit(Xreg, df_ml["Cognitive_Pattern"])
                 imp = pd.DataFrame({"Feature": Xreg.columns, "Importance": rf.feature_importances_}).sort_values("Importance")
-                clrs_imp = px.colors.sequential.Blues[2:]
-                bar_clrs = [clrs_imp[int(i/(len(imp)-1)*(len(clrs_imp)-1))] for i in range(len(imp))]
-                fig_imp  = go.Figure(go.Bar(
+                fig_imp = go.Figure(go.Bar(
                     y=imp["Feature"], x=imp["Importance"], orientation="h",
-                    marker_color=bar_clrs, marker_line_width=0,
+                    marker_color="#4f46e5", marker_line_width=0,
                     text=[f"{v:.3f}" for v in imp["Importance"]], textposition="outside",
                     textfont=dict(color=CLR_TEXT, size=11)))
                 fig_imp.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                     height=290, margin=dict(t=20,b=0,l=0,r=60),
                     title=dict(text="Random Forest Feature Importance", font=dict(size=13, color=CLR_TEXT)),
-                    xaxis=dict(title="Importance Score", tickfont=dict(color=CLR_SUB), gridcolor=CLR_SOFT),
+                    xaxis=dict(title="Importance", tickfont=dict(color=CLR_SUB), gridcolor=CLR_SOFT),
                     yaxis=dict(tickfont=dict(color=CLR_TEXT)), font=dict(color=CLR_TEXT))
-                st.plotly_chart(fig_imp, width="stretch")
-
-                preds_reg = lr.predict(Xrte)
-                fig_avp   = px.scatter(x=yrte, y=preds_reg, opacity=0.5,
-                    labels={"x":"Actual Score","y":"Predicted Score"},
-                    color_discrete_sequence=["#4f46e5"])
-                fig_avp.add_trace(go.Scatter(
-                    x=[yrte.min(), yrte.max()], y=[yrte.min(), yrte.max()],
-                    mode="lines", line=dict(color="#ef4444", dash="dash", width=2), name="Perfect Fit"))
-                fig_avp.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    height=290, margin=dict(t=20,b=0,l=0,r=0),
-                    title=dict(text="Actual vs. Predicted Score", font=dict(size=13, color=CLR_TEXT)),
-                    xaxis=dict(tickfont=dict(color=CLR_SUB), gridcolor=CLR_SOFT),
-                    yaxis=dict(tickfont=dict(color=CLR_SUB), gridcolor=CLR_SOFT),
-                    showlegend=False, font=dict(color=CLR_TEXT))
-                st.plotly_chart(fig_avp, width="stretch")
+                st.plotly_chart(fig_imp, use_container_width=True)
 
             st.markdown("#### 🏆 Multi-Model Classification Comparison")
             models = {
@@ -1286,7 +1073,7 @@ elif "Analytics" in app_mode:
                     yaxis=dict(title="Accuracy %", range=[0,110], tickfont=dict(color=CLR_SUB), gridcolor=CLR_SOFT),
                     xaxis=dict(tickfont=dict(color=CLR_TEXT, size=11)),
                     font=dict(color=CLR_TEXT))
-                st.plotly_chart(fig_mod, width="stretch")
+                st.plotly_chart(fig_mod, use_container_width=True)
     else:
         st.markdown(f"""
         <div style="text-align:center;padding:80px 40px;color:{CLR_SUB};">
