@@ -30,7 +30,7 @@
 ## 📂 Repository Structure
 
 ```text
-pattern_analyzer/
+cognitive_learning/
 │
 ├── README.md               ← Project documentation (this file)
 ├── requirements.txt        ← Python dependencies
@@ -60,8 +60,8 @@ pattern_analyzer/
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/your-username/pattern-analyzer.git
-cd pattern-analyzer
+git clone https://github.com/your-username/cognitive-learning.git
+cd cognitive_learning
 ```
 
 ### 2. Create a virtual environment
